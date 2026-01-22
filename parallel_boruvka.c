@@ -73,7 +73,14 @@ typedef struct
     igraph_real_t weight;
 }Edge;
 
+typedef struct MP
+{
+    igraph_int_t vertex1;
+    igraph_int_t vertex2;
+}MergePairs;
+
 MPI_Datatype MPI_EDGE;
+MPI_Datatype MPI_MERGE_PAIRS;
 MPI_Op MPI_MIN_EDGE;
 
 void create_MPI_Datatype_struct_edge(){
@@ -95,6 +102,24 @@ void create_MPI_Datatype_struct_edge(){
     displacements[2] = MPI_Aint_diff(address, start_address);
     MPI_Type_create_struct(3, block_lengths, displacements, typelist, &MPI_EDGE); 
     MPI_Type_commit(&MPI_EDGE);
+}
+
+void create_MPI_Datatype_struct_merge_pairs(){
+    MPI_Datatype typelist[2];
+    int block_lengths[2];
+    MPI_Aint displacements[2];
+    MPI_Aint start_address;
+    MPI_Aint address;
+    MergePairs mp;
+    block_lengths[0] = block_lengths[1] = 1; 
+    typelist[0] = MPI_INT64_T;
+    typelist[1] = MPI_INT64_T;
+    MPI_Get_address(&(mp.vertex1), &start_address);
+    displacements[0] = MPI_Aint_diff(start_address, start_address);
+    MPI_Get_address(&(mp.vertex2), &address);
+    displacements[1] = MPI_Aint_diff(address, start_address);
+    MPI_Type_create_struct(2, block_lengths, displacements, typelist, &MPI_MERGE_PAIRS); 
+    MPI_Type_commit(&MPI_MERGE_PAIRS);
 }
 
 /*Chapter 4 slide 58*/
@@ -129,7 +154,7 @@ int main(int argc, char* argv[]) {
     MPI_Init (&argc, &argv);
     MPI_Comm_rank (MPI_COMM_WORLD, &id);
     MPI_Comm_size (MPI_COMM_WORLD, &p);
-    seconds = - MPI_Wtime();
+    
     igraph_set_attribute_table(&igraph_cattribute_table);
     igraph_setup();
     igraph_t graph;
@@ -202,6 +227,7 @@ int main(int argc, char* argv[]) {
         MPI_Abort(MPI_COMM_WORLD, -1);
     }
     create_MPI_Datatype_struct_edge();
+    create_MPI_Datatype_struct_merge_pairs();
     MPI_Op_create(find_min_edge, 1, &MPI_MIN_EDGE);
     MPI_Scatterv(global_edges, count, disp, MPI_EDGE, local_edges, BLOCK_SIZE(id, p, num_edges), MPI_EDGE, 0, MPI_COMM_WORLD);
     free(count); free(disp);
@@ -238,6 +264,17 @@ int main(int argc, char* argv[]) {
         free(global_union_find);
         MPI_Abort(MPI_COMM_WORLD, -1);
     }
+    igraph_int_t local_num_edges = BLOCK_SIZE(id, p, num_edges);
+    igraph_int_t *comp = malloc(num_vertex * sizeof(igraph_int_t));
+    if(comp == NULL){
+        printf("Memoria non sufficiente per comp\n");
+        fflush(stdout);
+        free(local_edges);
+        free(local_min);
+        free(global_union_find);
+        free(global_min);
+        MPI_Abort(MPI_COMM_WORLD, -1);
+    }
     if(!id){
         MST = calloc(num_vertex-1, sizeof(Edge));
         if(MST == NULL){
@@ -251,17 +288,21 @@ int main(int argc, char* argv[]) {
     }
     int MST_count = 0;
 
-
+    seconds = - MPI_Wtime();
     MPI_Barrier(MPI_COMM_WORLD);
     while (global_num_components > 1){
-        for (int i = 0; i < num_vertex; i++)
-        {
+        igraph_int_t active_count = 0;
+        for (igraph_int_t i = 0; i < num_vertex; i++){
+            comp[i] = find(global_union_find, i);
+        }
+        for (igraph_int_t i = 0; i < global_num_components; i++){
             local_min[i].weight = IGRAPH_INTEGER_MAX;
         }
-        for (int i = 0; i < BLOCK_SIZE(id, p, num_edges); i++){
+        igraph_int_t active_edges = 0;
+        for (int i = 0; i < local_num_edges; i++){
             igraph_int_t comp_from, comp_to;
-            comp_from = find(global_union_find, local_edges[i].from);
-            comp_to = find(global_union_find, local_edges[i].to);
+            comp_from = comp[local_edges[i].from];
+            comp_to = comp[local_edges[i].to];
             if (comp_from != comp_to){
                 if (local_edges[i].weight < local_min[comp_from].weight){
                     local_min[comp_from].from = local_edges[i].from;
@@ -273,11 +314,16 @@ int main(int argc, char* argv[]) {
                     local_min[comp_to].to = local_edges[i].to;
                     local_min[comp_to].weight = local_edges[i].weight;
                 }
+                local_edges[active_edges].from = local_edges[i].from;
+                local_edges[active_edges].to = local_edges[i].to;
+                local_edges[active_edges].weight = local_edges[i].weight;
+                active_edges++;
             }
         }
-        MPI_Allreduce(local_min, global_min, num_vertex, MPI_EDGE, MPI_MIN_EDGE, MPI_COMM_WORLD);
-        for (int i = 0; i < num_vertex; i++)
-        {
+        local_num_edges = active_edges;
+        
+        MPI_AllReduce(local_min, global_min, global_num_components, MPI_EDGE, MPI_MIN_EDGE, MPI_COMM_WORLD);
+        for (int i = 0; i < global_num_components; i++){
             if(global_min[i].weight < IGRAPH_INTEGER_MAX){
                 int merged = merge_components(global_union_find, global_min[i].from, global_min[i].to, &global_num_components);
                 if(!id && merged){
@@ -289,9 +335,7 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    MPI_Barrier(MPI_COMM_WORLD);
 
-    
     seconds += MPI_Wtime();
     MPI_Reduce(&seconds, &max_seconds, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     if (!id){
@@ -340,6 +384,7 @@ int main(int argc, char* argv[]) {
     //         merge_components(from, to, &global_num_components)
     //     */
     // }
+    free(comp);
     free(global_min);
     free(local_min);
     free(global_union_find);
