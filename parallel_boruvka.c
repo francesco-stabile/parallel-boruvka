@@ -156,6 +156,8 @@ int main(int argc, char* argv[]) {
     }
     
     if (!id) {
+        // Da rifare meglio come Chapter 6 slide 38
+        // TODO
         igraph_error_t error = igraph_read_graph_ncol(&graph, fp, NULL, false, IGRAPH_ADD_WEIGHTS_YES, IGRAPH_UNDIRECTED);
         if (error == IGRAPH_PARSEERROR) {
             printf("Errore lettura file\n");
@@ -246,16 +248,16 @@ int main(int argc, char* argv[]) {
         MPI_Abort(MPI_COMM_WORLD, -1);
     }
 
-    igraph_int_t* comp = calloc(num_vertex, sizeof(igraph_int_t));
-    if (comp == NULL) {
-        printf("Memoria non sufficiente per l'array mapping\n");
-        fflush(stdout);
-        free(mapping);
-        free(local_edges);
-        free(local_min);
-        free(global_union_find);
-        MPI_Abort(MPI_COMM_WORLD, -1);
-    }
+    // igraph_int_t* comp = calloc(num_vertex, sizeof(igraph_int_t));
+    // if (comp == NULL) {
+    //     printf("Memoria non sufficiente per l'array comp\n");
+    //     fflush(stdout);
+    //     free(mapping);
+    //     free(local_edges);
+    //     free(local_min);
+    //     free(global_union_find);
+    //     MPI_Abort(MPI_COMM_WORLD, -1);
+    // }
     
     if (!id) {
         MST = calloc(num_vertex - 1, sizeof(Edge));
@@ -276,17 +278,18 @@ int main(int argc, char* argv[]) {
     seconds = -MPI_Wtime();
 
     int iteration = 0;
+    igraph_real_t total_weight = 0;
     double total_mapping_time = 0, total_search_time = 0, total_comm_time = 0, total_cleanup_time = 0;
     
-        while (global_num_components > 1) {
+    while (global_num_components > 1) {
         iteration++;
         double iter_start = MPI_Wtime();
         
         double mapping_start = MPI_Wtime();
         igraph_int_t active_count = 0;
         for (igraph_int_t i = 0; i < num_vertex; i++) {
-            comp[i] = find(global_union_find, i);
-            if (comp[i] == i) {
+            // comp[i] = find(global_union_find, i);
+            if (global_union_find[i].parent == i) {
                 mapping[i] = active_count;
                 local_min[active_count].weight = IGRAPH_INTEGER_MAX;
                 active_count++;
@@ -300,10 +303,13 @@ int main(int argc, char* argv[]) {
         
         double search_start = MPI_Wtime();
         for (igraph_int_t i = 0; i < local_num_edges; i++) {
-            igraph_int_t comp_from = mapping[comp[local_edges[i].from]]; //comp_from = comp[local_edges[i].from] -> comp_from = mapping[comp_from]
-            igraph_int_t comp_to = mapping[comp[local_edges[i].to]];
+            // igraph_int_t comp_from = comp[local_edges[i].from]; //comp_from = comp[local_edges[i].from] -> comp_from = mapping[comp_from]
+            // igraph_int_t comp_to = comp[local_edges[i].to];
+            igraph_int_t comp_from = local_edges[i].from;
+            igraph_int_t comp_to = local_edges[i].to;
             if (comp_from != comp_to) {
-                
+                comp_from = mapping[comp_from];
+                comp_to = mapping[comp_to];
                 if (local_edges[i].weight < local_min[comp_from].weight) {
                     local_min[comp_from] = local_edges[i];
                 }
@@ -324,6 +330,7 @@ int main(int argc, char* argv[]) {
                                             local_min[i].to, &global_num_components);
                 if (merged && !id) {
                     MST[MST_count++] = local_min[i];
+                    total_weight += local_min[i].weight;
                 }
             }
         }
@@ -331,21 +338,23 @@ int main(int argc, char* argv[]) {
         total_comm_time += MPI_Wtime() - comm_start;
         
         double cleanup_start = MPI_Wtime();
-        if (iteration % 4 == 0){
+        //if (iteration % 4 == 0){
             igraph_int_t active_edge = 0;
             for (igraph_int_t i = 0; i < local_num_edges; i++) {
-                igraph_int_t comp_from = comp[local_edges[i].from];
-                igraph_int_t comp_to = comp[local_edges[i].to];
+                // igraph_int_t comp_from = comp[local_edges[i].from];
+                // igraph_int_t comp_to = comp[local_edges[i].to];
+                local_edges[i].from = find(global_union_find, local_edges[i].from);
+                local_edges[i].to = find(global_union_find, local_edges[i].to);
                 
-                if (comp_from != comp_to) {
+                if (local_edges[i].from != local_edges[i].to) {
                     local_edges[active_edge] = local_edges[i];
                     active_edge++;
                 }
             }
 
             local_num_edges = active_edge;
-            local_min = realloc(local_min, active_count*sizeof(Edge));
-        }
+            // local_min = realloc(local_min, active_count*sizeof(Edge));
+        //}
 
         total_cleanup_time += MPI_Wtime() - cleanup_start;
     }
@@ -354,10 +363,8 @@ int main(int argc, char* argv[]) {
     MPI_Reduce(&seconds, &max_seconds, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     
     if (!id) {
-        igraph_real_t total_weight = 0;
-        for (int i = 0; i < num_vertex - 1; i++) {
-            total_weight += MST[i].weight;
-            if (num_vertex < 20) {
+        if (num_edges < 20) {
+            for (int i = 0; i < num_vertex - 1; i++) {
                 printf("Arco: %lld, %lld\n", MST[i].from, MST[i].to);
             }
         }
