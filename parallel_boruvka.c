@@ -5,11 +5,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+Definisco la struttura Union Find e i relativi metodi
+*/
+
 typedef struct UF {
     igraph_int_t rank;
     igraph_int_t parent;
 } UnionFind;
 
+
+/// @brief Inizializza la struttura Union-Find e imposta tutti i vertici con radice pari al vertice e rank pari a 0
+/// @param uf la struttura Union-Find da inizializzare
+/// @param n_vertex numero di vertici della struttura
+/// @param num_components numero di componenti
 void init_union_find(UnionFind* uf, igraph_int_t n_vertex, igraph_int_t* num_components) {
     for (int i = 0; i < n_vertex; i++) {
         uf[i].parent = i;
@@ -18,6 +27,10 @@ void init_union_find(UnionFind* uf, igraph_int_t n_vertex, igraph_int_t* num_com
     *num_components = n_vertex;
 }
 
+/// @brief Trova la componente di appartenenza del vertice risalendo la struttura fino a trovare la radice
+/// @param uf la struttura Union-Find
+/// @param vertex il vertice di cui si vuole trovare la radice
+/// @return la radice della componente di appartenenza
 igraph_int_t find(UnionFind* uf, igraph_int_t vertex) {
     if(uf[vertex].parent == vertex){
         return vertex;
@@ -26,6 +39,12 @@ igraph_int_t find(UnionFind* uf, igraph_int_t vertex) {
     return uf[vertex].parent;
 }
 
+/// @brief Fonde le componenti mantenendo l'altezza della Union-Find minore possibile
+/// @param uf la struttura Union-Find
+/// @param v1 primo vertice
+/// @param v2 secondo vertice
+/// @param num_components nuemro di componenti attuale
+/// @return 1 se il merge va a buon fine, 0 altrimenti. Inoltre imposta num_components al nuovo valore.
 int merge_components(UnionFind* uf, igraph_int_t v1, igraph_int_t v2, igraph_int_t* num_components) {
     int r1 = find(uf, v1);
     int r2 = find(uf, v2);
@@ -46,20 +65,23 @@ int merge_components(UnionFind* uf, igraph_int_t v1, igraph_int_t v2, igraph_int
     return 0;
 }
 
+/*
+Definisco com'è fatto un arco:
+Vertice sorgente - Vertice Destinazione e peso
+*/
+
 typedef struct {
     igraph_int_t from;
     igraph_int_t to;
     igraph_real_t weight;
 } Edge;
 
-// typedef struct {
-//     igraph_int_t vertex1;
-//     igraph_int_t vertex2;
-// } MergePair;
-
 MPI_Datatype MPI_EDGE;
-// MPI_Datatype MPI_MERGE_PAIRS;
 MPI_Op MPI_MIN_EDGE;
+
+/*
+Creo il dato personalizzato Edge per MPI, servirà per la AllReduce
+*/
 
 void create_MPI_Datatype_struct_edge() {
     MPI_Datatype typelist[3];
@@ -82,24 +104,6 @@ void create_MPI_Datatype_struct_edge() {
     MPI_Type_commit(&MPI_EDGE);
 }
 
-// void create_MPI_Datatype_merge_pair() {
-//     MPI_Datatype typelist[2];
-//     int block_lengths[2];
-//     MPI_Aint displacements[2];
-//     MPI_Aint start_address;
-//     MPI_Aint address;
-//     MergePair mp;
-//     block_lengths[0] = block_lengths[1] = 1;
-//     typelist[0] = MPI_INT64_T;
-//     typelist[1] = MPI_INT64_T;
-//     MPI_Get_address(&(mp.vertex1), &start_address);
-//     displacements[0] = MPI_Aint_diff(start_address, start_address);
-//     MPI_Get_address(&(mp.vertex2), &address);
-//     displacements[1] = MPI_Aint_diff(address, start_address);
-//     MPI_Type_create_struct(2, block_lengths, displacements, typelist, &MPI_MERGE_PAIRS);
-//     MPI_Type_commit(&MPI_MERGE_PAIRS);
-// }
-
 /*Chapter 4 slide 58*/
 /*void find_min_edge(Edge* edge_in, Edge* edge_inout, int* len, MPI_Datatype* dptr){
     for (int i=0; i < *len; i++){
@@ -112,17 +116,36 @@ void create_MPI_Datatype_struct_edge() {
     }
 }*/
 
+/*
+Definisco l'operazione da usare nella AllReduce
+Controllo per ciascuna cella dell'array l'arco con il peso minimo.
+L'algoritmo di Boruvka vuole una regola di spareggio:
+Se il peso è uguale, allora prendo l'arco con il vertice sorgente minimo
+Se anche il vertice sorgente è uguale, allora prendo l'arco con il vertice di destinazione minimo
+*/
+
 void find_min_edge(void* edge_in, void* edge_inout, int* len, MPI_Datatype* dptr) {
+    Edge* e_in = (Edge*) edge_in;
+    Edge* e_out = (Edge*) edge_inout;
     for (int i = 0; i < *len; i++) {
-        if (((Edge*)edge_in)[i].weight < ((Edge*)edge_inout)[i].weight) {
-            ((Edge*)edge_inout)[i].weight = ((Edge*)edge_in)[i].weight;
-            ((Edge*)edge_inout)[i].from = ((Edge*)edge_in)[i].from;
-            ((Edge*)edge_inout)[i].to = ((Edge*)edge_in)[i].to;
+        if (e_in[i].weight < e_out[i].weight) {
+            e_out[i] = e_in[i];
+        }
+        else if (e_in[i].weight == e_out[i].weight && e_in[i].weight < IGRAPH_INFINITY) {
+            if (e_in[i].from < e_out[i].from) {
+                e_out[i] = e_in[i];
+            } else if (e_in[i].from == e_out[i].from && e_in[i].to < e_out[i].to) {
+                e_out[i] = e_in[i];
+            }
         }
     }
 }
 
 int main(int argc, char* argv[]) {
+    /*
+    Inizializzo le variabili per MPI e igraph
+    Controllo eventuali errori nei parametri passati a linea di comando
+    */
     int id, p;
     double seconds;
     double max_seconds;
@@ -155,9 +178,14 @@ int main(int argc, char* argv[]) {
         MPI_Abort(MPI_COMM_WORLD, -3);
     }
     
+    /*
+    Fase di I/O, leggo con igraph_read_graph_ncol il grafo
+    Creo l'array contenente tutti gli archi del grafo
+    Invio il numero di archi e il numero di vertici totali
+    Tutti i processi allocano la memoria necessaria
+    Effettuo la Scatterv.
+    */
     if (!id) {
-        // Da rifare meglio come Chapter 6 slide 38
-        // TODO
         igraph_error_t error = igraph_read_graph_ncol(&graph, fp, NULL, false, IGRAPH_ADD_WEIGHTS_YES, IGRAPH_UNDIRECTED);
         if (error == IGRAPH_PARSEERROR) {
             printf("Errore lettura file\n");
@@ -185,6 +213,16 @@ int main(int argc, char* argv[]) {
             global_edges[i].to = VECTOR(vertex_pairs)[2 * i + 1];
             global_edges[i].weight = VECTOR(global_weights)[i];
         }
+        // /*
+        // Mescolamento Archi con algoritmo Fisher Yates
+        // Simulo un grafo in input con ordinamento casuale degli archi
+        // */
+        // for (igraph_int_t i = num_edges - 1; i > 0; i--) {
+        //     igraph_int_t j = rand() % (i + 1);
+        //     Edge temp = global_edges[i];
+        //     global_edges[i] = global_edges[j];
+        //     global_edges[j] = temp;
+        // }
         igraph_vector_int_destroy(&vertex_pairs);
         igraph_vector_destroy(&global_weights);
         igraph_destroy(&graph);
@@ -201,15 +239,13 @@ int main(int argc, char* argv[]) {
     
     int* count = NULL, *disp = NULL;
     create_mixed_xfer_arrays(id, p, num_edges, &count, &disp);
-    
-    Edge* local_edges = calloc(BLOCK_SIZE(id, p, num_edges), sizeof(Edge));
+    igraph_int_t local_num_edges = BLOCK_SIZE(id, p, num_edges);
+    Edge* local_edges = calloc(local_num_edges, sizeof(Edge));
     if (local_edges == NULL) {
         printf("Errore allocazione local_edges\n");
         MPI_Abort(MPI_COMM_WORLD, -1);
     }
-    
     create_MPI_Datatype_struct_edge();
-    //create_MPI_Datatype_merge_pair();
     MPI_Op_create(find_min_edge, 1, &MPI_MIN_EDGE);
     MPI_Scatterv(global_edges, count, disp, MPI_EDGE, local_edges, BLOCK_SIZE(id, p, num_edges), MPI_EDGE, 0, MPI_COMM_WORLD);
     free(count);
@@ -218,6 +254,14 @@ int main(int argc, char* argv[]) {
         free(global_edges);
     }
     
+    /*
+    Inizializzo tutte le strutture ausiliarie
+    Union-Find per trovare le componenti di appartenenza dei vertici
+    Local_min per gli archi minimi locali trovati
+    Mapping per avere indici delle componenti da 0 a numero componenti -1 e ridurre peso di AllReduce
+    MST per salvare gli archi del Minimum Spanning Tree (solo su processo 0)
+    */
+
     UnionFind* global_union_find = calloc(num_vertex, sizeof(UnionFind));
     if (global_union_find == NULL) {
         printf("Memoria non sufficiente per la Union Find\n");
@@ -247,17 +291,6 @@ int main(int argc, char* argv[]) {
         free(global_union_find);
         MPI_Abort(MPI_COMM_WORLD, -1);
     }
-
-    // igraph_int_t* comp = calloc(num_vertex, sizeof(igraph_int_t));
-    // if (comp == NULL) {
-    //     printf("Memoria non sufficiente per l'array comp\n");
-    //     fflush(stdout);
-    //     free(mapping);
-    //     free(local_edges);
-    //     free(local_min);
-    //     free(global_union_find);
-    //     MPI_Abort(MPI_COMM_WORLD, -1);
-    // }
     
     if (!id) {
         MST = calloc(num_vertex - 1, sizeof(Edge));
@@ -271,40 +304,36 @@ int main(int argc, char* argv[]) {
         }
     }
     int MST_count = 0;
-    
-    igraph_int_t local_num_edges = BLOCK_SIZE(id, p, num_edges);
-    
-    MPI_Barrier(MPI_COMM_WORLD);
-    seconds = -MPI_Wtime();
 
     int iteration = 0;
     igraph_real_t total_weight = 0;
-    double total_mapping_time = 0, total_search_time = 0, total_comm_time = 0, total_cleanup_time = 0;
-    
+    MPI_Barrier(MPI_COMM_WORLD);
+    seconds = -MPI_Wtime();
     while (global_num_components > 1) {
         iteration++;
-        double iter_start = MPI_Wtime();
-        
-        double mapping_start = MPI_Wtime();
+
+        /*
+        Se global_union_find[i].parent == i allora i è una componente
+        Effettuo la mappatura, mapping[i] = nuovo indice compreso tra [0-numero componenti -1]
+        Effettuo il reset di local_min
+        */
         igraph_int_t active_count = 0;
         for (igraph_int_t i = 0; i < num_vertex; i++) {
-            // comp[i] = find(global_union_find, i);
             if (global_union_find[i].parent == i) {
                 mapping[i] = active_count;
-                local_min[active_count].weight = IGRAPH_INTEGER_MAX;
+                local_min[active_count].weight = IGRAPH_INFINITY;
                 active_count++;
             }
         }
-        total_mapping_time += MPI_Wtime() - mapping_start;
         
-        // for (igraph_int_t i = 0; i < active_count; i++) {
-        //     local_min[i].weight = IGRAPH_INTEGER_MAX;
-        // }
-        
-        double search_start = MPI_Wtime();
+        /*
+        Ricerca negli archi assegnati dei minimi locali
+        All'inizio ogni vertice è una componente
+        Successivamente sovrascrivo i vertici con la loro componente
+        Se le componenti sono diverse, allora l'arco potrebbe essere valido
+        Si controlla se è il minimo attuale per entrambe le componenti (from e to)
+        */
         for (igraph_int_t i = 0; i < local_num_edges; i++) {
-            // igraph_int_t comp_from = comp[local_edges[i].from]; //comp_from = comp[local_edges[i].from] -> comp_from = mapping[comp_from]
-            // igraph_int_t comp_to = comp[local_edges[i].to];
             igraph_int_t comp_from = local_edges[i].from;
             igraph_int_t comp_to = local_edges[i].to;
             if (comp_from != comp_to) {
@@ -318,50 +347,51 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
-        total_search_time += MPI_Wtime() - search_start;
         
-        double comm_start = MPI_Wtime();
-        
+        /*
+        Allreduce con MPI_IN_PLACE per salvare spazio
+        Allreduce eseguita active_count volte grazie al mapping
+        Tutti avranno i minimi globali e procedono con la fase di merge
+        Solo il processo 0 aggiorna l'MST se c'è stata una fusione
+        */
         MPI_Allreduce(MPI_IN_PLACE, local_min, active_count, MPI_EDGE, MPI_MIN_EDGE, MPI_COMM_WORLD);
-        
         for (igraph_int_t i = 0; i < active_count; i++) {
-            if (local_min[i].weight < IGRAPH_INTEGER_MAX) {
-                int merged = merge_components(global_union_find, local_min[i].from, 
-                                            local_min[i].to, &global_num_components);
+            if (local_min[i].weight < IGRAPH_INFINITY) {
+                int merged = merge_components(global_union_find, local_min[i].from, local_min[i].to, &global_num_components);
                 if (merged && !id) {
-                    MST[MST_count++] = local_min[i];
+                    MST[MST_count] = local_min[i];
+                    MST_count++;
                     total_weight += local_min[i].weight;
                 }
             }
         }
         
-        total_comm_time += MPI_Wtime() - comm_start;
-        
-        double cleanup_start = MPI_Wtime();
-        //if (iteration % 4 == 0){
-            igraph_int_t active_edge = 0;
-            for (igraph_int_t i = 0; i < local_num_edges; i++) {
-                // igraph_int_t comp_from = comp[local_edges[i].from];
-                // igraph_int_t comp_to = comp[local_edges[i].to];
-                local_edges[i].from = find(global_union_find, local_edges[i].from);
-                local_edges[i].to = find(global_union_find, local_edges[i].to);
-                
-                if (local_edges[i].from != local_edges[i].to) {
-                    local_edges[active_edge] = local_edges[i];
-                    active_edge++;
-                }
+        /*
+        Si eliminano gli archi locali interni alle componenti
+        Dopo le fusioni delle componenti, si sovrascrive, per ciascun arco, le radici delle componenti sui vertici
+        Se le due componenti sono diverse, allora l'arco può essere ancora utile nella prossima iterazione
+        Sovrascrivo il numero di archi che il processo possiede con il numero di archi attivi trovati
+        */
+        igraph_int_t active_edge = 0;
+        for (igraph_int_t i = 0; i < local_num_edges; i++) {
+            local_edges[i].from = find(global_union_find, local_edges[i].from);
+            local_edges[i].to = find(global_union_find, local_edges[i].to);
+            
+            if (local_edges[i].from != local_edges[i].to) {
+                local_edges[active_edge] = local_edges[i];
+                active_edge++;
             }
+        }
 
-            local_num_edges = active_edge;
-            // local_min = realloc(local_min, active_count*sizeof(Edge));
-        //}
-
-        total_cleanup_time += MPI_Wtime() - cleanup_start;
+        local_num_edges = active_edge;
     }
-    seconds += MPI_Wtime();
     MPI_Barrier(MPI_COMM_WORLD);
+    seconds += MPI_Wtime();
     MPI_Reduce(&seconds, &max_seconds, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     
+    /*
+    Il processo 0 detiene il MST finale e lo stampa
+    */
     if (!id) {
         if (num_edges < 20) {
             for (int i = 0; i < num_vertex - 1; i++) {
@@ -371,52 +401,16 @@ int main(int argc, char* argv[]) {
         printf("Peso totale MST: %.1f\n", total_weight);
         printf("Parallel_Boruvka) V = %lld, E = %lld, Processes = %d, Iterations = %d, Time = %12.6f sec\n",
                num_vertex, num_edges, p, iteration, max_seconds);
-        printf("Mapping=%.2fs, search=%.2fs, comm=%.2fs, cleanup=%.2fs\n",
-               total_mapping_time, total_search_time, total_comm_time, total_cleanup_time);
-        free(MST);
+       free(MST);
     }
-    
-    // igraph_int_t num_edges = igraph_ecount(&graph);
-    // igraph_int_t p_num_edges = num_edges / p;
-    // igraph_int_t start_edge_id = id*p_num_edges;
-    // igraph_int_t last_edge_id = (id+1)*p_num_edges -1;
-    // while (global_num_components > 1){
-    //     igraph_vector_int_t local_min;
-    //     igraph_vector_int_init(&local_min, global_num_components);
-    //     for (igraph_int_t i = 0; i < global_num_components; i++){
-    //         VECTOR(local_min)[i] = IGRAPH_INTEGER_MAX;
-    //     }
-    //     for (igraph_int_t i = 0; i < p_num_edges; i++){
-    //         igraph_int_t from, to;
-    //         igraph_int_t eid = start_edge_id + i;
-    //         igraph_edge(&graph, eid, &from, &to);
-    //         igraph_int_t comp_from, comp_to;
-    //         comp_from = find(global_union_find, from);
-    //         comp_to = find(global_union_find, to);
-    //         if(comp_from != comp_to){
-    //             /*
-    //             if(peso(eid) < peso(VECTOR(local_min)[comp_from]))
-    //                 VECTOR(local_min)[comp_from] = eid;
-    //             if(peso(eid) < peso(VECTOR(local_min)[comp_to]))
-    //                 VECTOR(local_min)[comp_to] = eid;
-    //             */
-    //         }
-    //     }
-    //     //MPI_Allreduce(&local_min, &global_min, global_num_components, MPI_MIN, MPI_COMM_WORLD);
-    //     igraph_vector_int_destroy(&local_min);
-    //     /*
-    //     for each arco in global min
-    //         prendi dall'arco from e to
-    //         merge_components(from, to, &global_num_components)
-    //     */
-    // }
 
+
+    //Liberazione delle risorse allocate.
     free(local_min);
     free(global_union_find);
     free(local_edges);
     free(mapping);
     MPI_Type_free(&MPI_EDGE);
-    //MPI_Type_free(&MPI_MERGE_PAIRS);
     MPI_Op_free(&MPI_MIN_EDGE);
     MPI_Finalize();
     return 0;
